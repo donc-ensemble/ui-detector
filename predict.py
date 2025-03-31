@@ -6,10 +6,16 @@ from datetime import timedelta
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
 
-# Initialize once (outside the loop) - load it globally for efficiency
+# Initialize PaddleOCR globally for efficiency
 ppocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False)
 
-# ===== 2. IMPROVED TEXT EXTRACTION =====
+def format_timestamp_with_ms(timestamp_ms):
+    """Convert milliseconds to HH:MM:SS:MS format"""
+    seconds, milliseconds = divmod(timestamp_ms, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}:{int(milliseconds):03d}"
+
 def extract_text_ppocr(image, bbox):
     """Extract text using PaddleOCR from a bounding box"""
     try:
@@ -46,8 +52,6 @@ def extract_text_ppocr(image, bbox):
         print(f"PPOCR failed: {str(e)}")
         return None
 
-
-# ===== 3. NON-MAXIMUM SUPPRESSION FOR DUPLICATE DETECTION =====
 def apply_nms(elements, iou_threshold=0.5):
     """Apply non-maximum suppression to remove overlapping detections"""
     if not elements:
@@ -97,7 +101,6 @@ def apply_nms(elements, iou_threshold=0.5):
     
     return [e for e in final_elements if not e.get('suppressed', False)]
 
-# ===== 4. FOCUS STATE RESOLVER =====
 def resolve_focus_conflicts(elements):
     """Ensure only one element can be focused at a time"""
     if not elements:
@@ -123,10 +126,8 @@ def resolve_focus_conflicts(elements):
     
     return elements
 
-# Calculate IoU between two boxes
 def calculate_iou(box1, box2):
     """Calculate Intersection over Union of two boxes"""
-    # Extract coordinates
     x1_1, y1_1, x2_1, y2_1 = box1
     x1_2, y1_2, x2_2, y2_2 = box2
     
@@ -149,13 +150,50 @@ def calculate_iou(box1, box2):
     iou = intersection_area / float(area1 + area2 - intersection_area)
     return iou
 
-# NEW FUNCTION: Get incremental filename to avoid overwriting
+def elements_are_similar(elem1, elem2, position_threshold=0.1, text_similarity_threshold=0.8):
+    """Check if two elements are similar enough to be considered the same state"""
+    # Check if types and names match
+    if elem1['type'] != elem2['type'] or elem1['name'] != elem2['name']:
+        return False
+    
+    # Check if states match
+    if elem1['state'] != elem2['state']:
+        return False
+    
+    # Check position similarity
+    iou = calculate_iou(elem1['position'], elem2['position'])
+    if iou < position_threshold:
+        return False
+    
+    # Check text similarity
+    text1 = elem1.get('text', '')
+    text2 = elem2.get('text', '')
+    
+    if text1 != text2:
+        return False
+    
+    return True
+
+def states_are_similar(state1, state2):
+    """Check if two states are similar enough to be considered duplicates"""
+    if len(state1['ui_elements']) != len(state2['ui_elements']):
+        return False
+    
+    # Sort elements for comparison
+    state1_sorted = sorted(state1['ui_elements'], key=lambda x: (x['type'], x['position'][0], x['position'][1]))
+    state2_sorted = sorted(state2['ui_elements'], key=lambda x: (x['type'], x['position'][0], x['position'][1]))
+    
+    for elem1, elem2 in zip(state1_sorted, state2_sorted):
+        if not elements_are_similar(elem1, elem2):
+            return False
+    
+    return True
+
 def get_incremental_filename(base_path):
     """Create an incremental filename if file already exists"""
     if not os.path.exists(base_path):
         return base_path
         
-    # Split into name and extension
     base_dir = os.path.dirname(base_path)
     filename = os.path.basename(base_path)
     name_parts = os.path.splitext(filename)
@@ -170,7 +208,7 @@ def get_incremental_filename(base_path):
             return new_path
         counter += 1
 
-# ===== 5. COMBINED PROCESSING FUNCTION =====
+
 def process_video_with_output(video_path, model_path, output_json_path, output_video_path=None, confidence_threshold=0.9):
     """Process video with model, generate JSON log and annotated video output"""
     if not os.path.exists(video_path):
@@ -201,7 +239,6 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
     
     # State tracking
     state_log = []
-    previous_elements = []
     frame_count = 0
     
     print(f"Processing video with {total_frames} frames...")
@@ -215,9 +252,9 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
         if frame_count % 50 == 0:
             print(f"Processing frame {frame_count}/{total_frames} ({frame_count/total_frames*100:.1f}%)")
         
-        # Get accurate timestamp
+        # Get accurate timestamp in milliseconds and format it
         timestamp_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-        timestamp = str(timedelta(milliseconds=timestamp_ms)).split(".")[0]
+        timestamp_str = format_timestamp_with_ms(timestamp_ms)
         
         # Run detection
         results = model(frame)[0]
@@ -235,9 +272,8 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
                     "position": [x1, y1, x2, y2],
                     "state": "focused" if "_focused" in class_name else "unfocused",
                     "confidence": float(box.conf),
-                    "text": None  # Will be filled later
+                    "text": None
                 }
-                
                 current_elements.append(element)
         
         # Apply NMS to filter duplicates
@@ -251,55 +287,41 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
             if element['type'] in ('button', 'input'):
                 element['text'] = extract_text_ppocr(frame, element['position'])
         
-        # ===== IMPROVED CHANGE DETECTION WITH RULES =====
-        changed = False
+        # Create current state
+        current_state = {
+            "timestamp": timestamp_str,
+            "frame_number": frame_count,
+            "ui_elements": current_elements
+        }
         
-        # First frame always gets recorded
-        if not previous_elements:
-            changed = True
-        # Different number of elements is definitely a change
-        elif len(current_elements) != len(previous_elements):
-            changed = True
-        else:
-            # Compare elements when counts match
-            # Sort by position for stable comparison
-            curr_sorted = sorted(current_elements, key=lambda x: (x['position'][0], x['position'][1]))
-            prev_sorted = sorted(previous_elements, key=lambda x: (x['position'][0], x['position'][1]))
-            
-            for curr, prev in zip(curr_sorted, prev_sorted):
-                # Check if element type/name changed
-                if curr['name'] != prev['name']:
-                    changed = True
-                    break
-                    
-                # Check if focused state changed (important)
-                if curr['state'] != prev['state']:
-                    changed = True
-                    break
-                
-                # For position, we check if there's NO overlap (completely different position)
-                iou = calculate_iou(curr['position'], prev['position'])
-                if iou < 0.1:  # Less than 10% overlap means significantly different position
-                    changed = True
-                    break
+        # Check if this state is different from the previous logged state
+        should_log = not state_log  # Always log first frame
         
-        # Add to log if changed or first frame
-        if changed or not state_log:
-            state_log.append({
-                "timestamp": timestamp,
-                "ui_elements": current_elements
-            })
-            # Create a deep copy to avoid reference issues
-            previous_elements = []
-            for elem in current_elements:
-                previous_elements.append(elem.copy())
+        if state_log:
+            last_state = state_log[-1]
+            # Check if the number of elements changed
+            if len(current_elements) != len(last_state['ui_elements']):
+                should_log = True
+            else:
+                # Check if any element has changed significantly
+                for curr_elem, prev_elem in zip(
+                    sorted(current_elements, key=lambda x: (x['type'], x['position'][0], x['position'][1])),
+                    sorted(last_state['ui_elements'], key=lambda x: (x['type'], x['position'][0], x['position'][1]))
+                ):
+                    if not elements_are_similar(curr_elem, prev_elem):
+                        should_log = True
+                        break
+        
+        # Log if different or first frame
+        if should_log:
+            state_log.append(current_state)
         
         # Draw annotations on frame if video output is requested
         if video_writer:
             # Draw current frame number and timestamp
             cv2.putText(
                 frame,
-                f"Frame: {frame_count}, Time: {timestamp}",
+                f"Frame: {frame_count}, Time: {timestamp_str}",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -310,17 +332,10 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
             # Draw detection boxes
             for element in current_elements:
                 x1, y1, x2, y2 = element['position']
-                
-                # Use different colors for different states
                 color = (0, 255, 0) if element['state'] == 'unfocused' else (0, 0, 255)
-                
-                # Draw rectangle
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 
-                # Prepare label with class, state and confidence
                 label = f"{element['name']} {element['confidence']:.2f}"
-                
-                # Add text if available
                 if element['text']:
                     label += f" | '{element['text']}'"
                 
@@ -351,16 +366,21 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
     if video_writer:
         video_writer.release()
     
+    # Post-processing: Remove any duplicate states
+    unique_states = []
+    for state in state_log:
+        if not unique_states or not states_are_similar(state, unique_states[-1]):
+            unique_states.append(state)
+    
     # Write JSON file
     with open(output_json_path, 'w') as f:
-        json.dump(state_log, f, indent=2, default=str)
+        json.dump(unique_states, f, indent=2, default=str)
     
-    print(f"Processing complete. Generated {len(state_log)} state entries.")
+    print(f"Processing complete. Generated {len(unique_states)} state entries.")
     print(f"JSON saved to: {output_json_path}")
     if output_video_path:
         print(f"Annotated video saved to: {output_video_path}")
-
-# ===== 6. MAIN EXECUTION =====
+            
 if __name__ == "__main__":
     try:
         VIDEOS_DIR = os.path.join('.', 'videos')
@@ -380,7 +400,7 @@ if __name__ == "__main__":
             model_path=model_path,
             output_json_path=output_json_path,
             output_video_path=output_video_path,
-            confidence_threshold=0.9  # Set to 0.9 as required
+            confidence_threshold=0.9
         )
     except Exception as e:
         print(f"Error: {str(e)}")

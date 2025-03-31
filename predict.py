@@ -150,8 +150,8 @@ def calculate_iou(box1, box2):
     iou = intersection_area / float(area1 + area2 - intersection_area)
     return iou
 
-def elements_are_similar(elem1, elem2, position_threshold=0.1, text_similarity_threshold=0.8):
-    """Check if two elements are similar enough to be considered the same state"""
+def elements_are_similar(elem1, elem2, position_threshold=5, text_similarity_threshold=0.9):
+    """Check if two elements are similar with tolerance for minor position changes"""
     # Check if types and names match
     if elem1['type'] != elem2['type'] or elem1['name'] != elem2['name']:
         return False
@@ -160,26 +160,26 @@ def elements_are_similar(elem1, elem2, position_threshold=0.1, text_similarity_t
     if elem1['state'] != elem2['state']:
         return False
     
-    # Check position similarity
-    iou = calculate_iou(elem1['position'], elem2['position'])
-    if iou < position_threshold:
+    # Check position similarity with threshold
+    pos1 = np.array(elem1['position'])
+    pos2 = np.array(elem2['position'])
+    if np.any(np.abs(pos1 - pos2) > position_threshold):
         return False
     
     # Check text similarity
     text1 = elem1.get('text', '')
     text2 = elem2.get('text', '')
-    
     if text1 != text2:
         return False
     
     return True
 
 def states_are_similar(state1, state2):
-    """Check if two states are similar enough to be considered duplicates"""
+    """Check if two states are similar enough to be merged"""
     if len(state1['ui_elements']) != len(state2['ui_elements']):
         return False
     
-    # Sort elements for comparison
+    # Sort elements for consistent comparison
     state1_sorted = sorted(state1['ui_elements'], key=lambda x: (x['type'], x['position'][0], x['position'][1]))
     state2_sorted = sorted(state2['ui_elements'], key=lambda x: (x['type'], x['position'][0], x['position'][1]))
     
@@ -188,6 +188,24 @@ def states_are_similar(state1, state2):
             return False
     
     return True
+
+def merge_similar_states(state_log):
+    """Merge consecutive similar states, keeping the earliest occurrence"""
+    if not state_log:
+        return []
+    
+    merged_log = [state_log[0]]
+    
+    for current_state in state_log[1:]:
+        last_merged = merged_log[-1]
+        
+        if states_are_similar(last_merged, current_state):
+            # Skip this state as it's similar to the last merged one
+            continue
+        else:
+            merged_log.append(current_state)
+    
+    return merged_log
 
 def get_incremental_filename(base_path):
     """Create an incremental filename if file already exists"""
@@ -367,10 +385,7 @@ def process_video_with_output(video_path, model_path, output_json_path, output_v
         video_writer.release()
     
     # Post-processing: Remove any duplicate states
-    unique_states = []
-    for state in state_log:
-        if not unique_states or not states_are_similar(state, unique_states[-1]):
-            unique_states.append(state)
+    unique_states = merge_similar_states(state_log)
     
     # Write JSON file
     with open(output_json_path, 'w') as f:

@@ -2,7 +2,6 @@ import os
 import cv2
 import json
 import numpy as np
-from datetime import timedelta
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
 

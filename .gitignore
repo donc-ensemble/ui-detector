@@ -3,3 +3,9 @@ bkp/*
 data/*
 json/*
 videos/*
+__pycache__
+pycache/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store

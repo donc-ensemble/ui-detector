@@ -15,7 +15,7 @@ train_args = {
         "device": device,
         "workers": min(4, os.cpu_count() - 1),
         "seed": 42,
-        "split": 0.2,  # Auto 80/20 split
+        "split": 0.2,  # Auto 80/20 split of 124 data samples
         
         # Learning parameters
         "lr0": 0.001,

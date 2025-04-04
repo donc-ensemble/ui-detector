@@ -18,8 +18,8 @@ This project focuses on using ML-based CNN frameworks for UI widget detection in
 ## Setup Instructions
 ### 1. Create Virtual Environment
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows use: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate  # On Windows use: venv\Scripts\activate
 ```
 
 ### 2. Install Dependencies
